@@ -1,0 +1,12 @@
+torch==2.1.0
+scipy==1.10.1
+torch-scatter
+torch-sparse
+torch-spline-conv
+torch-cluster
+wandb==0.16.3
+tensordict==0.2.0
+pytorch-lightning==2.1.0
+einops==0.8.0
+ml4co-kit==0.3.3
+tqdm
