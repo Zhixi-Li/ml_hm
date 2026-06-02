@@ -1,2 +1,5 @@
 Project/data/
 __pycache__/
+Project/baselines/lc_baseline/checkpoints
+Project/baselines/lc_baseline/checkpoints_baseline
+Project/baselines/gp_baseline/checkpoints
