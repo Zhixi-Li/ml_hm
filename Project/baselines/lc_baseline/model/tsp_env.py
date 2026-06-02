@@ -4,7 +4,7 @@ sys.path.append("../")
 from dataclasses import dataclass
 import torch
 from torch import Tensor
-from typing import Union, Tuple, Any
+from typing import Tuple, Any
 
 
 @dataclass
@@ -25,12 +25,17 @@ class Step_State:
     # shape: (batch, pomo, node)
 
 class TSPEnv:
-    def __init__(self, **env_params):
+    def __init__(self, task: str, node_cnt: int, pomo_size: int):
         # Const @INIT
         ####################################
-        self.env_params = env_params
-        self.node_cnt = env_params["node_cnt"]
-        self.pomo_size = env_params["pomo_size"]
+        self.env_params = {
+            "task": task,
+            "node_cnt": node_cnt,
+            "pomo_size": pomo_size,
+        }
+        self.node_cnt = node_cnt
+        self.pomo_size = pomo_size
+        self.default_node_cnt = self.node_cnt
 
         # Const @Load_Problem
         ####################################
@@ -55,13 +60,24 @@ class TSPEnv:
         ####################################
         self.step_state = None
 
+    def set_problem_size(self, node_cnt: int, pomo_size: int = None) -> None:
+        self.node_cnt = int(node_cnt)
+        self.pomo_size = int(self.node_cnt if pomo_size is None else pomo_size)
+
+    def _create_index_tensors(self, device: torch.device) -> None:
+        self.BATCH_IDX = torch.arange(
+            self.batch_size, device=device
+        )[:, None].expand(self.batch_size, self.pomo_size)
+        self.POMO_IDX = torch.arange(
+            self.pomo_size, device=device
+        )[None, :].expand(self.batch_size, self.pomo_size)
+
     def load_problems(self, batch_size: int) -> None:
         self.batch_size = batch_size
-        self.BATCH_IDX = torch.arange(self.batch_size)[:, None].expand(self.batch_size, self.pomo_size)
-        self.POMO_IDX = torch.arange(self.pomo_size)[None, :].expand(self.batch_size, self.pomo_size)
         
         # Generate random points in [0, 1]
         self.coordinates = torch.rand(size=(batch_size, self.node_cnt, 2))
+        self._create_index_tensors(self.coordinates.device)
         # Calculate distance matrix
         self.problems = torch.cdist(self.coordinates, self.coordinates, p=2)
         # shape: (batch, node, node)
@@ -69,8 +85,8 @@ class TSPEnv:
     def load_problems_manual(self, problems: Tensor, coordinates: Tensor = None) -> None:
         # problems.shape: (batch, node, node)
         self.batch_size = problems.size(0)
-        self.BATCH_IDX = torch.arange(self.batch_size)[:, None].expand(self.batch_size, self.pomo_size)
-        self.POMO_IDX = torch.arange(self.pomo_size)[None, :].expand(self.batch_size, self.pomo_size)
+        self.set_problem_size(problems.size(1))
+        self._create_index_tensors(problems.device)
         self.problems = problems
         self.coordinates = coordinates
         # shape: (batch, node, node)
@@ -78,7 +94,11 @@ class TSPEnv:
     def reset(self) -> Tuple[Reset_State, None, Any]:
         self.selected_count = 0
         self.current_node = None # shape: (batch, pomo)
-        self.selected_node_list = torch.empty((self.batch_size, self.pomo_size, 0), dtype=torch.long) # shape: (batch, pomo, 0~)
+        self.selected_node_list = torch.empty(
+            (self.batch_size, self.pomo_size, 0),
+            dtype=torch.long,
+            device=self.problems.device
+        ) # shape: (batch, pomo, 0~)
         self._create_step_state()
         reward = None
         done = False
@@ -86,7 +106,10 @@ class TSPEnv:
 
     def _create_step_state(self) -> None:
         self.step_state = Step_State(BATCH_IDX=self.BATCH_IDX, POMO_IDX=self.POMO_IDX)
-        self.step_state.ninf_mask = torch.zeros((self.batch_size, self.pomo_size, self.node_cnt))
+        self.step_state.ninf_mask = torch.zeros(
+            (self.batch_size, self.pomo_size, self.node_cnt),
+            device=self.problems.device
+        )
         # shape: (batch, pomo, node)
 
     def pre_step(self) -> Tuple[Step_State, None, Any]:

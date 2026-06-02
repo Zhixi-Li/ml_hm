@@ -7,8 +7,34 @@ from torch import Tensor
 from typing import Union, Tuple
 
 class LCModel(nn.Module):
-    def __init__(self, **model_params):
+    def __init__(
+        self,
+        embedding_dim,
+        sqrt_embedding_dim,
+        num_att_layers,
+        qkv_dim,
+        sqrt_qkv_dim,
+        num_heads,
+        logit_clipping,
+        ff_hidden_dim,
+        eval_type,
+        distance_bias=True,
+        distance_logit_bias=True
+    ):
         super().__init__()
+        model_params = {
+            'embedding_dim': embedding_dim,
+            'sqrt_embedding_dim': sqrt_embedding_dim,
+            'num_att_layers': num_att_layers,
+            'qkv_dim': qkv_dim,
+            'sqrt_qkv_dim': sqrt_qkv_dim,
+            'num_heads': num_heads,
+            'logit_clipping': logit_clipping,
+            'ff_hidden_dim': ff_hidden_dim,
+            'eval_type': eval_type,
+            'distance_bias': distance_bias,
+            'distance_logit_bias': distance_logit_bias,
+        }
         self.model_params = model_params
         self.encoder = TSP_Encoder(**model_params)
         self.decoder = TSP_Decoder(**model_params)
@@ -17,16 +43,17 @@ class LCModel(nn.Module):
     def pre_forward(self, reset_state):
         # POMO uses coordinates
         # reset_state.coordinates: (batch, node, 2)
-        self.encoded_nodes = self.encoder(reset_state.coordinates)
-        self.decoder.set_kv(self.encoded_nodes)
+        self.encoded_nodes = self.encoder(reset_state.coordinates, reset_state.problems)
+        self.decoder.set_kv(self.encoded_nodes, reset_state.problems)
 
     def forward(self, state):
         batch_size = state.BATCH_IDX.size(0)
         pomo_size = state.BATCH_IDX.size(1)
 
         if state.current_node is None:
-            selected = torch.arange(pomo_size)[None, :].expand(batch_size, pomo_size)
-            prob = torch.ones(size=(batch_size, pomo_size))
+            device = self.encoded_nodes.device
+            selected = torch.arange(pomo_size, device=device)[None, :].expand(batch_size, pomo_size)
+            prob = torch.ones(size=(batch_size, pomo_size), device=device)
             
             # For the first step, we use a placeholder or the "first" node embedding
             # In POMO, usually the first node is selected based on POMO_IDX
@@ -35,7 +62,11 @@ class LCModel(nn.Module):
             self.decoder.set_q1(encoded_first_node)
         else:
             encoded_current_node = _get_encoding(self.encoded_nodes, state.current_node) # shape: (batch, pomo, embedding)
-            all_job_probs = self.decoder.forward(encoded_current_node, ninf_mask=state.ninf_mask) # shape: (batch, pomo, job)
+            all_job_probs = self.decoder.forward(
+                encoded_current_node,
+                current_node=state.current_node,
+                ninf_mask=state.ninf_mask
+            ) # shape: (batch, pomo, job)
             
             if self.training or self.model_params["eval_type"] == "softmax":
                 while True:  # to fix pytorch.multinomial bug on selecting 0 probability elements
@@ -77,11 +108,13 @@ class TSP_Encoder(nn.Module):
             EncoderLayer(**model_params) for _ in range(model_params['num_att_layers'])
         ])
 
-    def forward(self, x):
+    def forward(self, x, dist=None):
         # x: (batch, node, 2)
         h = self.embedding(x) # (batch, node, embed)
+        if dist is None:
+            dist = torch.cdist(x, x, p=2)
         for layer in self.layers:
-            h = layer(h)
+            h = layer(h, dist)
         return h
 
 class EncoderLayer(nn.Module):
@@ -91,7 +124,7 @@ class EncoderLayer(nn.Module):
         num_heads = model_params['num_heads']
         ff_hidden_dim = model_params['ff_hidden_dim']
         
-        self.mha = nn.MultiheadAttention(embedding_dim, num_heads, batch_first=True)
+        self.mha = DistanceAwareMultiheadAttention(**model_params)
         self.norm1 = nn.InstanceNorm1d(embedding_dim)
         self.ff = nn.Sequential(
             nn.Linear(embedding_dim, ff_hidden_dim),
@@ -100,11 +133,11 @@ class EncoderLayer(nn.Module):
         )
         self.norm2 = nn.InstanceNorm1d(embedding_dim)
 
-    def forward(self, x):
+    def forward(self, x, dist):
         # x: (batch, node, embed)
         
         # MHA
-        h, _ = self.mha(x, x, x)
+        h = self.mha(x, dist)
         h = (x + h).transpose(1, 2) # (batch, embed, node)
         h = self.norm1(h).transpose(1, 2) # (batch, node, embed)
         
@@ -114,6 +147,45 @@ class EncoderLayer(nn.Module):
         h2 = self.norm2(h2).transpose(1, 2)
         
         return h2
+
+
+class DistanceAwareMultiheadAttention(nn.Module):
+    def __init__(self, **model_params):
+        super().__init__()
+        embedding_dim = model_params['embedding_dim']
+        num_heads = model_params['num_heads']
+        qkv_dim = model_params['qkv_dim']
+
+        self.num_heads = num_heads
+        self.qkv_dim = qkv_dim
+        self.sqrt_qkv_dim = math.sqrt(qkv_dim)
+        self.use_distance_bias = model_params.get('distance_bias', True)
+
+        self.Wq = nn.Linear(embedding_dim, num_heads * qkv_dim, bias=False)
+        self.Wk = nn.Linear(embedding_dim, num_heads * qkv_dim, bias=False)
+        self.Wv = nn.Linear(embedding_dim, num_heads * qkv_dim, bias=False)
+        self.out_proj = nn.Linear(num_heads * qkv_dim, embedding_dim)
+        self.distance_bias = nn.Sequential(
+            nn.Linear(1, num_heads),
+            nn.Tanh()
+        )
+
+    def forward(self, x: Tensor, dist: Tensor) -> Tensor:
+        batch_size, node_cnt, _ = x.size()
+        q = reshape_by_heads(self.Wq(x), self.num_heads)
+        k = reshape_by_heads(self.Wk(x), self.num_heads)
+        v = reshape_by_heads(self.Wv(x), self.num_heads)
+
+        score = torch.matmul(q, k.transpose(2, 3)) / self.sqrt_qkv_dim
+        if self.use_distance_bias:
+            dist_norm = normalize_distance(dist)
+            dist_bias = self.distance_bias(dist_norm.unsqueeze(-1)).permute(0, 3, 1, 2)
+            score = score + dist_bias
+
+        weights = F.softmax(score, dim=-1)
+        out = torch.matmul(weights, v)
+        out = out.transpose(1, 2).reshape(batch_size, node_cnt, self.num_heads * self.qkv_dim)
+        return self.out_proj(out)
 
 
 ########################################
@@ -139,20 +211,24 @@ class TSP_Decoder(nn.Module):
         self.v = None  # saved value, for multi-head_attention
         self.single_head_key = None  # saved key, for single-head attention
         self.q1 = None  # saved q1, for multi-head attention
+        self.dist = None
+        self.use_distance_logit_bias = self.model_params.get("distance_logit_bias", True)
+        self.distance_logit_scale = nn.Parameter(torch.tensor(0.25))
 
-    def set_kv(self, encoded_jobs: Tensor) -> None:
+    def set_kv(self, encoded_jobs: Tensor, dist: Tensor = None) -> None:
         # encoded_jobs.shape: (batch, job, embedding)
         num_heads = self.model_params["num_heads"]
         self.k = reshape_by_heads(self.Wk(encoded_jobs), num_heads=num_heads)
         self.v = reshape_by_heads(self.Wv(encoded_jobs), num_heads=num_heads) # shape: (batch, num_heads, job, qkv_dim)
         self.single_head_key = encoded_jobs.transpose(1, 2) # shape: (batch, embedding, job)
+        self.dist = normalize_distance(dist) if dist is not None else None
 
     def set_q1(self, encoded_q1: Tensor) -> None:
         # encoded_q.shape: (batch, n, embedding)  # n can be 1 or pomo
         num_heads = self.model_params["num_heads"]
         self.q1 = reshape_by_heads(self.Wq_1(encoded_q1), num_heads=num_heads) # shape: (batch, num_heads, n, qkv_dim)
 
-    def forward(self, encoded_q0: Tensor, ninf_mask: Tensor) -> Tensor:
+    def forward(self, encoded_q0: Tensor, current_node: Tensor, ninf_mask: Tensor) -> Tensor:
         # encoded_q4.shape: (batch, pomo, embedding)
         # ninf_mask.shape: (batch, pomo, job)
         num_heads = self.model_params["num_heads"]
@@ -171,6 +247,10 @@ class TSP_Decoder(nn.Module):
         score = torch.matmul(mh_atten_out, self.single_head_key) # shape: (batch, pomo, job)
         sqrt_embedding_dim = math.sqrt(embedding_dim)
         score_scaled = score / sqrt_embedding_dim # shape: (batch, pomo, job)
+        if self.use_distance_logit_bias and self.dist is not None:
+            candidate_dist = gather_candidate_distance(self.dist, current_node)
+            distance_scale = F.softplus(self.distance_logit_scale)
+            score_scaled = score_scaled - distance_scale * candidate_dist
         score_clipped = logit_clipping * torch.tanh(score_scaled)
         score_masked = score_clipped + ninf_mask
         probs = F.softmax(score_masked, dim=2) # shape: (batch, pomo, job)
@@ -216,3 +296,14 @@ def reshape_by_heads(qkv: Tensor, num_heads: int) -> Tensor:
     q_reshaped = qkv.reshape(batch_s, n, num_heads, -1) # shape: (batch, n, num_heads, key_dim)
     q_transposed = q_reshaped.transpose(1, 2) # shape: (batch, num_heads, n, key_dim)
     return q_transposed
+
+
+def normalize_distance(dist: Tensor) -> Tensor:
+    scale = dist.amax(dim=(1, 2), keepdim=True).clamp_min(1e-6)
+    return dist / scale
+
+
+def gather_candidate_distance(dist: Tensor, current_node: Tensor) -> Tensor:
+    node_cnt = dist.size(2)
+    gather_index = current_node[:, :, None].expand(-1, -1, node_cnt)
+    return dist.gather(dim=1, index=gather_index)

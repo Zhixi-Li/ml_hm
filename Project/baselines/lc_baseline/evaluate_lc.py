@@ -31,9 +31,15 @@ LOGIT_CLIPPING = 10
 
 # Test data
 TEST_DATA_PATH = '../../data/val/tsp50_uniform_val_128.txt'
+TEST_DATASETS = {
+    'tsp50_uniform': '../../data/val/tsp50_uniform_val_128.txt',
+    'tsp50_ood': '../../data/val/tsp50_ood_val_16.txt',
+    'tsp100_uniform': '../../data/val/tsp100_uniform_val_16.txt',
+}
+EVALUATE_ALL_VAL = True
 
 # Device
-DEVICE = 'cuda:1' if torch.cuda.is_available() else 'cpu'
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
 ########################
@@ -51,6 +57,8 @@ model_params = {
     'logit_clipping': LOGIT_CLIPPING,
     'ff_hidden_dim': FF_HIDDEN_DIM,
     'eval_type': 'argmax',
+    'distance_bias': True,
+    'distance_logit_bias': True,
 }
 
 # Environment parameters
@@ -142,6 +150,29 @@ def evaluate_model(model, env, test_solver, device):
     return results
 
 
+def load_solver(path):
+    solver = TSPSolver()
+    solver.from_txt(
+        path, ref=True,
+        normalize="uniform" not in path
+    )
+    return solver
+
+
+def print_results(results):
+    print(f"Number of instances: {results['num_instances']}")
+    print(f"Average cost:        {results['avg_cost']:.4f}")
+
+    if 'avg_optimal_cost' in results:
+        print(f"Average optimal:     {results['avg_optimal_cost']:.4f}")
+
+    if 'avg_gap' in results:
+        print(f"Average gap:         {results['avg_gap']:.2f}%")
+
+    print(f"Total time:          {results['total_time']:.2f}s")
+    print(f"Avg time/instance:   {results['avg_time_per_instance']:.4f}s")
+
+
 def main():
     print("=" * 60)
     print("LC Baseline Evaluation - TSP-50 with POMO")
@@ -157,15 +188,6 @@ def main():
         torch.set_default_tensor_type('torch.cuda.FloatTensor')
     else:
         torch.set_default_tensor_type('torch.FloatTensor')
-
-    # Load test data
-    print(f"\nLoading test data from {TEST_DATA_PATH}...")
-    test_solver = TSPSolver()
-    test_solver.from_txt(
-        TEST_DATA_PATH, ref=True,
-        normalize="uniform" not in TEST_DATA_PATH
-    )
-    print(f"Loaded {len(test_solver.points)} test instances")
 
     # Create model and environment
     print(f"\nLoading model from {MODEL_PATH}...")
@@ -183,34 +205,25 @@ def main():
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model loaded with {num_params:,} parameters")
 
-    # Evaluate
-    results = evaluate_model(model, env, test_solver, DEVICE)
+    if EVALUATE_ALL_VAL:
+        for name, path in TEST_DATASETS.items():
+            print("\n" + "=" * 60)
+            print(f"Evaluation Results - {name}")
+            print("=" * 60)
+            test_solver = load_solver(path)
+            print(f"Loaded {len(test_solver.points)} instances from {path}")
+            results = evaluate_model(model, env, test_solver, DEVICE)
+            print_results(results)
+    else:
+        print(f"\nLoading test data from {TEST_DATA_PATH}...")
+        test_solver = load_solver(TEST_DATA_PATH)
+        print(f"Loaded {len(test_solver.points)} test instances")
+        results = evaluate_model(model, env, test_solver, DEVICE)
 
-    # Print results
-    print("\n" + "=" * 60)
-    print("Evaluation Results")
-    print("=" * 60)
-    print(f"Number of instances: {results['num_instances']}")
-    print(f"Average cost:        {results['avg_cost']:.4f}")
-    # print(f"Std cost:            {results['std_cost']:.4f}")
-    # print(f"Min cost:            {results['min_cost']:.4f}")
-    # print(f"Max cost:            {results['max_cost']:.4f}")
-
-    if 'avg_optimal_cost' in results:
-        print(f"\nOptimal cost (reference):")
-        print(f"Average optimal:     {results['avg_optimal_cost']:.4f}")
-        # print(f"Std optimal:         {results['std_optimal_cost']:.4f}")
-        # print(f"Min optimal:         {results['min_optimal_cost']:.4f}")
-        # print(f"Max optimal:         {results['max_optimal_cost']:.4f}")
-
-    if 'avg_gap' in results:
-        print(f"\nGap to reference:")
-        print(f"Average gap:         {results['avg_gap']:.2f}%")
-        # print(f"Std gap:             {results['std_gap']:.2f}%")
-
-    print(f"\nTiming:")
-    print(f"Total time:          {results['total_time']:.2f}s")
-    print(f"Avg time/instance:   {results['avg_time_per_instance']:.4f}s")
+        print("\n" + "=" * 60)
+        print("Evaluation Results")
+        print("=" * 60)
+        print_results(results)
 
     print("=" * 60)
 
