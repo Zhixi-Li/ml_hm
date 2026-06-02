@@ -33,7 +33,7 @@ LOGIT_CLIPPING = 10
 TEST_DATA_PATH = '../../data/val/tsp50_uniform_val_128.txt'
 
 # Device
-DEVICE = 'cuda:1' if torch.cuda.is_available() else 'cpu'
+DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
 
 ########################

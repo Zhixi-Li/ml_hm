@@ -42,7 +42,7 @@ LEARNING_RATE = 1e-4
 VAL_INTERVAL = 1
 
 # Device
-DEVICE = 'cuda:1' if torch.cuda.is_available() else 'cpu'
+DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
 
 def train_one_batch(model, env, optimizer, batch_size):
