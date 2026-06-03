@@ -38,12 +38,14 @@ LOGIT_CLIPPING = 10
 
 # Training parameters
 BATCH_SIZE = 64
-EPOCHS = 100
+EPOCHS = 150
 BATCHES_PER_EPOCH = 100
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-6
 GRAD_CLIP_NORM = 1.0
-CURRICULUM_START_EPOCH = 60
+CURRICULUM_START_EPOCH = 35
+CURRICULUM_NODE_CNTS = [50, 75, 100]
+CURRICULUM_PROBS = [0.4, 0.2, 0.4]
 
 # Validation
 VAL_INTERVAL = 1
@@ -79,7 +81,7 @@ def augment_coords_d4(coords):
 def sample_curriculum_node_cnt(epoch):
     if epoch < CURRICULUM_START_EPOCH:
         return 50
-    return int(np.random.choice([50, 75, 100], p=[0.6, 0.2, 0.2]))
+    return int(np.random.choice(CURRICULUM_NODE_CNTS, p=CURRICULUM_PROBS))
 
 
 def batch_size_for_node_cnt(node_cnt):
@@ -282,6 +284,8 @@ def main():
     print(f"  - Batch size: {BATCH_SIZE}")
     print(f"  - Learning rate: {LEARNING_RATE}")
     print(f"  - Curriculum starts: epoch {CURRICULUM_START_EPOCH}")
+    print(f"  - Curriculum node counts: {CURRICULUM_NODE_CNTS}")
+    print(f"  - Curriculum probs: {CURRICULUM_PROBS}")
     print(f"  - Device: {DEVICE}")
     print("=" * 60)
 
